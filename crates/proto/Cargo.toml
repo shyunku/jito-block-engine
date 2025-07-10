@@ -1,0 +1,14 @@
+[package]
+name = "be-proto"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+tonic = { version = "0.11", features = ["transport"] }
+prost = "0.12"
+prost-types = "0.12"
+
+[build-dependencies]
+tonic-build = "0.11"
+glob = "0.3"

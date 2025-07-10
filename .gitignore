@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Vendored dependencies
+/vendor/
+
+# IDEs and OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo

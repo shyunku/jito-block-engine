@@ -1,0 +1,18 @@
+[package]
+name = "be-gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tonic = { version = "0.11", features = ["transport", "tls"] }
+async-trait = "0.1"
+tracing = "0.1"
+be-proto = { path = "../proto" }
+be-core  = { path = "../core" }
+tokio-stream = { version = "0.1", features = ["sync"] }
+anyhow = "1.0"
+rand = "0.8"
+prost-types = "0.12"
+futures-util = "0.3"
+base64 = "0.21"
