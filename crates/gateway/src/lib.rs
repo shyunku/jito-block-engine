@@ -292,8 +292,7 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
         tokio::spawn(async move {
             // Consume incoming messages (PacketBatchUpdate)
             while let Some(msg) = _req.get_mut().message().await.unwrap() {
-                // Process incoming messages if needed
-                tracing::info!("Received PacketBatchUpdate: {:?}", msg);
+                tracing::trace!("Received PacketBatchUpdate: {:?}", msg);
             }
         });
         tokio::spawn(async move {
