@@ -4,6 +4,7 @@ use clap::Parser;
 struct Cli {
     #[arg(long)]
     grpc_addr: String,
+    
 }
 
 #[tokio::main]

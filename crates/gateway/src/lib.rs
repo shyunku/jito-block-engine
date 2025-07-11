@@ -9,6 +9,10 @@ use be_proto::auth::auth_service_server::{AuthService, AuthServiceServer};
 use be_proto::block_engine::block_engine_validator_server::{
     BlockEngineValidator, BlockEngineValidatorServer,
 };
+use be_proto::relayer::relayer_server::{Relayer, RelayerServer};
+use be_proto::block_engine::block_engine_relayer_server::{
+    BlockEngineRelayer, BlockEngineRelayerServer,
+};
 // Explicitly import generated types
 use be_proto::auth::{
     GenerateAuthChallengeRequest, GenerateAuthChallengeResponse,
@@ -19,8 +23,19 @@ use be_proto::block_engine::{
     BlockBuilderFeeInfoRequest, BlockBuilderFeeInfoResponse,
     SubscribeBundlesRequest, SubscribeBundlesResponse,
     SubscribePacketsRequest, SubscribePacketsResponse,
+    AccountsOfInterestRequest, AccountsOfInterestUpdate,
+    ProgramsOfInterestRequest, ProgramsOfInterestUpdate,
+    PacketBatchUpdate, StartExpiringPacketStreamResponse,
+};
+use be_proto::relayer::{
+    GetTpuConfigsRequest, GetTpuConfigsResponse,
+    SubscribePacketsRequest as RelayerSubscribePacketsRequest,
+    SubscribePacketsResponse as RelayerSubscribePacketsResponse,
+    subscribe_packets_response::Msg as RelayerSubscribePacketsResponseMsg,
 };
 use be_proto::bundle::BundleUuid;
+use be_proto::shared::{Header, Socket};
+use be_proto::packet::PacketBatch;
 
 pub async fn run(addr: std::net::SocketAddr) -> anyhow::Result<()> {
     // 브로드캐스트 채널: stub 데이터
@@ -29,11 +44,15 @@ pub async fn run(addr: std::net::SocketAddr) -> anyhow::Result<()> {
 
     let auth = AuthSvc::default();
     let validator = ValidatorSvc::new(bundle_tx.clone(), packet_tx.clone());
+    let relayer = RelayerSvc::default();
+    let block_engine_relayer = BlockEngineRelayerSvc::default();
 
     tracing::info!("Serving gRPC on {addr}");
     Server::builder()
         .add_service(AuthServiceServer::new(auth))
         .add_service(BlockEngineValidatorServer::new(validator))
+        .add_service(RelayerServer::new(relayer))
+        .add_service(BlockEngineRelayerServer::new(block_engine_relayer))
         .serve(addr)
         .await?;
 
@@ -154,6 +173,149 @@ impl BlockEngineValidator for ValidatorSvc {
             .map_err(|e| Status::internal(format!("Packet stream error: {}", e)));
         Ok(Response::new(Box::pin(stream)))
     }
+}
+
+// -------------------- Relayer --------------------
+
+#[derive(Default)]
+struct RelayerSvc;
+
+impl RelayerSvc {}
+
+#[async_trait]
+impl Relayer for RelayerSvc {
+    async fn get_tpu_configs(
+        &self,
+        _req: Request<GetTpuConfigsRequest>,
+    ) -> Result<Response<GetTpuConfigsResponse>, Status> {
+        Ok(Response::new(GetTpuConfigsResponse {
+            tpu: Some(Socket {
+                ip: "127.0.0.1".to_string(),
+                port: 8000,
+            }),
+            tpu_forward: Some(Socket {
+                ip: "127.0.0.1".to_string(),
+                port: 8001,
+            }),
+        }))
+    }
+
+    type SubscribePacketsStream = Pin<Box<dyn Stream<Item = Result<RelayerSubscribePacketsResponse, Status>> + Send>>;
+    async fn subscribe_packets(
+        &self,
+        _req: Request<RelayerSubscribePacketsRequest>,
+    ) -> Result<Response<Self::SubscribePacketsStream>, Status> {
+        // TODO: Implement actual packet subscription logic for relayer
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        tokio::spawn(async move {
+            // Example: send a dummy packet every second
+            for _i in 0..5 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                let packet_batch = PacketBatch {
+                    packets: vec![], // Fill with actual packets
+                };
+                let header = Header {
+                    ts: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                };
+                let response = RelayerSubscribePacketsResponse {
+                    header: Some(header),
+                    msg: Some(RelayerSubscribePacketsResponseMsg::Batch(packet_batch)),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+// -------------------- BlockEngineRelayer --------------------
+
+#[derive(Default)]
+struct BlockEngineRelayerSvc;
+
+#[async_trait]
+impl BlockEngineRelayer for BlockEngineRelayerSvc {
+    async fn subscribe_accounts_of_interest(
+        &self,
+        _req: Request<AccountsOfInterestRequest>,
+    ) -> Result<Response<Self::SubscribeAccountsOfInterestStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            // Send a dummy update every 5 seconds
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                let update = AccountsOfInterestUpdate {
+                    accounts: vec!["dummy_account_1".to_string(), "dummy_account_2".to_string()],
+                };
+                if tx.send(Ok(update)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    type SubscribeAccountsOfInterestStream = Pin<Box<dyn Stream<Item = Result<AccountsOfInterestUpdate, Status>> + Send>>;
+
+    async fn subscribe_programs_of_interest(
+        &self,
+        _req: Request<ProgramsOfInterestRequest>,
+    ) -> Result<Response<Self::SubscribeProgramsOfInterestStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            // Send a dummy update every 5 seconds
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                let update = ProgramsOfInterestUpdate {
+                    programs: vec!["dummy_program_1".to_string(), "dummy_program_2".to_string()],
+                };
+                if tx.send(Ok(update)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    type SubscribeProgramsOfInterestStream = Pin<Box<dyn Stream<Item = Result<ProgramsOfInterestUpdate, Status>> + Send>>;
+
+    async fn start_expiring_packet_stream(
+        &self,
+        mut _req: Request<tonic::Streaming<PacketBatchUpdate>>,
+    ) -> Result<Response<Self::StartExpiringPacketStreamStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            // Consume incoming messages (PacketBatchUpdate)
+            while let Some(msg) = _req.get_mut().message().await.unwrap() {
+                // Process incoming messages if needed
+                tracing::info!("Received PacketBatchUpdate: {:?}", msg);
+            }
+        });
+        tokio::spawn(async move {
+            // Send a dummy heartbeat every 1 second
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                let heartbeat = StartExpiringPacketStreamResponse {
+                    heartbeat: Some(be_proto::shared::Heartbeat {
+                        count: 0, // Add the count field
+                        ts: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                    }),
+                };
+                if tx.send(Ok(heartbeat)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    type StartExpiringPacketStreamStream = Pin<Box<dyn Stream<Item = Result<StartExpiringPacketStreamResponse, Status>> + Send>>;
 }
 
 
