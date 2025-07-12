@@ -10,8 +10,6 @@ pub struct Header {
 pub struct Heartbeat {
     #[prost(uint64, tag = "1")]
     pub count: u64,
-    #[prost(message, optional, tag = "2")]
-    pub ts: ::core::option::Option<::prost_types::Timestamp>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

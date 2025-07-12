@@ -1,9 +1,0 @@
-[package]              # 자동 코드만 담는 라이브러리
-name = "be-proto"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-tonic = { version = "0.11", features = ["transport"] }   # gRPC 런타임
-prost = "0.12"                                           # protobuf
-prost-types = "0.12"

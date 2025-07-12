@@ -1,3 +1,6 @@
 [submodule "vendor/mev-protos"]
 	path = vendor/mev-protos
 	url = https://github.com/jito-labs/mev-protos
+[submodule "mev-protos"]
+	path = mev-protos
+	url = https://github.com/jito-labs/mev-protos.git
