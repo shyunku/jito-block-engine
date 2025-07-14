@@ -53,6 +53,7 @@ pub struct Config {
     pub min_bundle_size: usize,
     pub min_tip_lamports: u64,
     pub programs_of_interest: Vec<String>,
+    pub validator_keypair_path: String,
 }
 
 // Wrapper struct for solana_sdk::packet::Packet to implement From trait
@@ -88,6 +89,11 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
     let (_for_leader_tx, for_leader_rx) = tokio::sync::mpsc::channel(128);
 
     let rpc_client = Arc::new(RpcClient::new(config.rpc_url.clone()));
+    let validator_keypair = Keypair::read_from_file(&config.validator_keypair_path)
+        .expect("Failed to load validator keypair");
+    let validator_identity = validator_keypair.pubkey().to_string();
+
+    tracing::info!("Connected to RPC with {:?}", config.rpc_url);
 
     let bundle_accepted_counter =
         IntCounter::new("bundle_accepted_total", "Total number of accepted bundles")?;
@@ -138,6 +144,7 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
         bundle_accepted_counter,
         bundle_rejected_counter,
         bundle_processing_duration,
+        validator_identity.clone(),
     );
     tokio::spawn(bundle_processor.run());
 
@@ -173,7 +180,11 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
     Ok(())
 }
 
-use solana_sdk::{signature::Signature, transaction::VersionedTransaction};
+use solana_sdk::{
+    commitment_config::CommitmentConfig, signature::EncodableKey, signature::Keypair,
+    signature::Signature, signer::Signer, transaction::VersionedTransaction,
+};
+use solana_client::rpc_config::RpcSimulateTransactionConfig;
 use tokio_util::time::DelayQueue;
 
 struct BundleProcessor {
@@ -184,6 +195,7 @@ struct BundleProcessor {
     bundle_accepted_counter: IntCounter,
     bundle_rejected_counter: IntCounter,
     bundle_processing_duration: Histogram,
+    validator_identity: String,
 }
 
 impl BundleProcessor {
@@ -198,6 +210,7 @@ impl BundleProcessor {
         bundle_accepted_counter: IntCounter,
         bundle_rejected_counter: IntCounter,
         bundle_processing_duration: Histogram,
+        validator_identity: String,
     ) -> Self {
         Self {
             bundle_rx,
@@ -207,6 +220,7 @@ impl BundleProcessor {
             bundle_accepted_counter,
             bundle_rejected_counter,
             bundle_processing_duration,
+            validator_identity,
         }
     }
 
@@ -217,7 +231,21 @@ impl BundleProcessor {
         for packet in &bundle.packets {
             let tx: VersionedTransaction = bincode::deserialize(&packet.data).unwrap();
             let sig = tx.signatures[0];
-            let res = rpc.simulate_transaction(&tx).await.unwrap();
+            tracing::info!(
+                "Simulating transaction with blockhash: {:?}",
+                tx.message.recent_blockhash()
+            );
+            let res = rpc
+                .simulate_transaction_with_config(
+                    &tx,
+                    RpcSimulateTransactionConfig {
+                        commitment: Some(CommitmentConfig::processed()),
+                        replace_recent_blockhash: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|e| (sig, format!("RPC simulation call failed: {:?}", e)))?;
             if let Some(err) = res.value.err {
                 return Err((sig, format!("tx {} failed: {:?}", sig, err)));
             }
@@ -240,11 +268,12 @@ impl BundleProcessor {
                             ).await {
                                 Ok(_) => {
                                     self.bundle_accepted_counter.inc();
+                                    tracing::info!("Bundle simulation successful for bundle: {}", bundle_uuid.uuid);
                                     BundleResult {
                                         bundle_id: bundle_uuid.uuid.clone(),
                                         result: Some(be_proto::bundle::bundle_result::Result::Accepted(be_proto::bundle::Accepted {
-                                            slot: self.rpc_client.get_slot().await.unwrap_or(0), // Actual leader slot
-                                            validator_identity: "block_engine_validator_identity".to_string(), // Actual validator identity
+                                            slot: self.rpc_client.get_slot().await.unwrap_or(0),
+                                            validator_identity: self.validator_identity.clone(),
                                         })),
                                     }
                                 }

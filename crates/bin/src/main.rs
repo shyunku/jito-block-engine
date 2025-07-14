@@ -32,6 +32,8 @@ struct Cli {
     /// Multiple `--program <ID>` allowed
     #[arg(long = "program", value_name = "PROGRAM_ID", num_args = 1.., required = true)]
     programs_of_interest: Vec<String>,
+    #[arg(long, value_name = "PATH")]
+    validator_keypair_path: String,
 }
 
 #[tokio::main]
@@ -50,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         min_bundle_size: cli.min_bundle_size,
         min_tip_lamports: cli.min_tip_lamports,
         programs_of_interest: cli.programs_of_interest,
+        validator_keypair_path: cli.validator_keypair_path,
     };
 
     let addr = cli.grpc_addr.parse()?;

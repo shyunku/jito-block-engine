@@ -55,10 +55,10 @@ To run the block engine, execute the compiled binary. It requires certain argume
 
 ```bash
 # For debug build
-./target/debug/block-engine --grpc-addr 0.0.0.0:9003 --builder-pubkey <YOUR_BUILDER_PUBKEY> --program <YOUR_PROGRAM_ID>
+./target/debug/block-engine --grpc-addr 0.0.0.0:9003 --builder-pubkey <YOUR_BUILDER_PUBKEY> --program <YOUR_PROGRAM_ID> --validator-keypair-path <PATH_TO_YOUR_VALIDATOR_KEYPAIR>
 
 # For release build
-./target/release/block-engine --grpc-addr 0.0.0.0:9003 --builder-pubkey <YOUR_BUILDER_PUBKEY> --program <YOUR_PROGRAM_ID>
+./target/release/block-engine --grpc-addr 0.0.0.0:9003 --builder-pubkey <YOUR_BUILDER_PUBKEY> --program <YOUR_PROGRAM_ID> --validator-keypair-path <PATH_TO_YOUR_VALIDATOR_KEYPAIR>
 ```
 
 You should see output similar to:
@@ -107,6 +107,7 @@ The `block-engine` executable supports the following command-line arguments for 
 *   `--min-bundle-size <MIN_BUNDLE_SIZE>`: Minimum bundle size (default: `100`).
 *   `--min-tip-lamports <LAMPORTS>`: Minimum tip in lamports (default: `1000`).
 *   `--program <PROGRAM_ID>...`: One or more program IDs to monitor.
+*   `--validator-keypair-path <PATH>`: Path to the validator keypair file (e.g., `~/.config/solana/id.json`).
 
 ## Contributing
 
