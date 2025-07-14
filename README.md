@@ -51,20 +51,22 @@ The compiled executable will be located in `target/debug/block-engine` or `targe
 
 ### 3. Running the Block Engine
 
-To run the block engine, execute the compiled binary. By default, it will serve gRPC on `0.0.0.0:9003`.
+To run the block engine, execute the compiled binary. It requires certain arguments to run.
 
 ```bash
 # For debug build
-./target/debug/block-engine
+./target/debug/block-engine --grpc-addr 0.0.0.0:9003 --builder-pubkey <YOUR_BUILDER_PUBKEY> --program <YOUR_PROGRAM_ID>
 
 # For release build
-./target/release/block-engine
+./target/release/block-engine --grpc-addr 0.0.0.0:9003 --builder-pubkey <YOUR_BUILDER_PUBKEY> --program <YOUR_PROGRAM_ID>
 ```
 
 You should see output similar to:
 ```
 INFO  be_gateway - Serving gRPC on 0.0.0.0:9003
 ```
+
+For a full list of configuration options, refer to the "Configuration" section below.
 
 ### 4. Integrating with Jito Transaction Relayer
 
@@ -89,6 +91,22 @@ jito-transaction-relayer \
 *   `crates/core`: Core logic and utilities for the block engine.
 *   `crates/gateway`: Implements the gRPC services (Auth, Validator, Relayer). This is where the primary server logic resides.
 *   `crates/proto`: Defines the Protocol Buffer messages and gRPC service definitions for communication between components.
+
+## Configuration
+
+The `block-engine` executable supports the following command-line arguments for configuration:
+
+*   `--grpc-addr <HOST:PORT>`: The address for the gRPC server to listen on.
+*   `--rpc-url <RPC_URL>`: URL for the Solana RPC endpoint (default: `http://127.0.0.1:8899`).
+*   `--tpu-ip <TPU_IP>`: IP address for the Transaction Processing Unit (TPU) (default: `127.0.0.1`).
+*   `--tpu-port <TPU_PORT>`: Port for the Transaction Processing Unit (TPU) (default: `8000`).
+*   `--tpu-forward-ip <TPU_FORWARD_IP>`: IP address to forward TPU traffic to (default: `127.0.0.1`).
+*   `--tpu-forward-port <TPU_FORWARD_PORT>`: Port to forward TPU traffic to (default: `8001`).
+*   `--builder-pubkey <PUBKEY>`: Public key of the block builder.
+*   `--builder-commission <BUILDER_COMMISSION>`: Builder commission percentage (default: `100`).
+*   `--min-bundle-size <MIN_BUNDLE_SIZE>`: Minimum bundle size (default: `100`).
+*   `--min-tip-lamports <LAMPORTS>`: Minimum tip in lamports (default: `1000`).
+*   `--program <PROGRAM_ID>...`: One or more program IDs to monitor.
 
 ## Contributing
 
