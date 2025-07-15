@@ -41,7 +41,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status, transport::Server};
 use warp::Filter;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub rpc_url: String,
     pub tpu_ip: String,
@@ -134,7 +134,7 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
         config.min_tip_lamports,
         rpc_client.clone(),
     );
-    let block_engine_relayer = BlockEngineRelayerSvc::new(packet_tx.clone(), Arc::new(config));
+    let block_engine_relayer = BlockEngineRelayerSvc::new(packet_tx.clone(), Arc::new(config.clone()));
 
     let bundle_processor = BundleProcessor::new(
         bundle_tx.subscribe(),
@@ -145,10 +145,11 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
         bundle_rejected_counter,
         bundle_processing_duration,
         validator_identity.clone(),
+        _for_leader_tx,
     );
     tokio::spawn(bundle_processor.run());
 
-    let for_leader_queue = ForLeaderQueue::new(for_leader_rx, rpc_client.clone());
+    let for_leader_queue = ForLeaderQueue::new(for_leader_rx, rpc_client.clone(), config.tpu_ip.clone(), config.tpu_port);
     tokio::spawn(for_leader_queue.run());
 
     let metrics_route = warp::path!("metrics").map(|| {
@@ -196,6 +197,7 @@ struct BundleProcessor {
     bundle_rejected_counter: IntCounter,
     bundle_processing_duration: Histogram,
     validator_identity: String,
+    for_leader_tx: tokio::sync::mpsc::Sender<BundleUuid>,
 }
 
 impl BundleProcessor {
@@ -211,6 +213,7 @@ impl BundleProcessor {
         bundle_rejected_counter: IntCounter,
         bundle_processing_duration: Histogram,
         validator_identity: String,
+        for_leader_tx: tokio::sync::mpsc::Sender<BundleUuid>,
     ) -> Self {
         Self {
             bundle_rx,
@@ -221,6 +224,7 @@ impl BundleProcessor {
             bundle_rejected_counter,
             bundle_processing_duration,
             validator_identity,
+            for_leader_tx,
         }
     }
 
@@ -269,6 +273,9 @@ impl BundleProcessor {
                                 Ok(_) => {
                                     self.bundle_accepted_counter.inc();
                                     tracing::info!("Bundle simulation successful for bundle: {}", bundle_uuid.uuid);
+                                    if let Err(e) = self.for_leader_tx.send(bundle_uuid.clone()).await {
+                                        tracing::error!("Failed to send bundle to for_leader_queue: {:?}", e);
+                                    }
                                     BundleResult {
                                         bundle_id: bundle_uuid.uuid.clone(),
                                         result: Some(be_proto::bundle::bundle_result::Result::Accepted(be_proto::bundle::Accepted {
@@ -317,13 +324,17 @@ impl BundleProcessor {
 struct ForLeaderQueue {
     bundle_rx: tokio::sync::mpsc::Receiver<BundleUuid>,
     rpc_client: Arc<RpcClient>,
+    tpu_ip: String,
+    tpu_port: u16,
 }
 
 impl ForLeaderQueue {
-    fn new(bundle_rx: tokio::sync::mpsc::Receiver<BundleUuid>, rpc_client: Arc<RpcClient>) -> Self {
+    fn new(bundle_rx: tokio::sync::mpsc::Receiver<BundleUuid>, rpc_client: Arc<RpcClient>, tpu_ip: String, tpu_port: u16) -> Self {
         Self {
             bundle_rx,
             rpc_client,
+            tpu_ip,
+            tpu_port,
         }
     }
 
@@ -333,27 +344,25 @@ impl ForLeaderQueue {
                 bundle_uuid_option = self.bundle_rx.recv() => {
                     if let Some(bundle_uuid) = bundle_uuid_option {
                         tracing::info!("Bundle received for leader queue: {}", bundle_uuid.uuid);
-                        // In a real implementation, you would get the actual leader schedule
-                        // and send the bundle to the appropriate TPU port at the right time.
-                        // For now, we'll just simulate sending it.
-
-                        let current_slot = match self.rpc_client.get_slot().await {
-                            Ok(slot) => slot,
+                        let tpu_addr = format!("{}:{}", self.tpu_ip, self.tpu_port);
+                        let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+                            Ok(s) => s,
                             Err(e) => {
-                                tracing::error!("Failed to get current slot: {:?}", e);
+                                tracing::error!("Failed to bind UDP socket for sending to TPU: {:?}", e);
                                 continue;
                             }
                         };
 
-                        // Simulate sending to TPU 13 slots ahead
-                        let target_slot = current_slot + 13;
-                        tracing::info!("Simulating sending bundle {} to TPU for slot {}", bundle_uuid.uuid, target_slot);
-
                         if let Some(bundle) = bundle_uuid.bundle {
-                            for tx_bytes in bundle.packets {
-                                // In a real scenario, you'd send this to the TPU port
-                                // For now, just log it.
-                                tracing::info!("Simulating sending transaction to TPU: {:?}", tx_bytes);
+                            for packet in bundle.packets {
+                                match socket.send_to(&packet.data, &tpu_addr).await {
+                                    Ok(bytes_sent) => {
+                                        tracing::info!("Sent {} bytes to TPU at {}", bytes_sent, tpu_addr);
+                                    },
+                                    Err(e) => {
+                                        tracing::error!("Failed to send packet to TPU: {:?}", e);
+                                    }
+                                }
                             }
                         }
                     }
