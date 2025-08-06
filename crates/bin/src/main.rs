@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 struct Cli {
@@ -32,8 +33,12 @@ struct Cli {
     /// Multiple `--program <ID>` allowed
     #[arg(long = "program", value_name = "PROGRAM_ID", num_args = 1.., required = true)]
     programs_of_interest: Vec<String>,
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "VALIDATOR_KEYPAIR_PATH")]
     validator_keypair_path: String,
+    #[arg(long, value_name = "LEDGER_PATH")]
+    ledger_path: String,
+    #[arg(long, value_name = "SNAPSHOT_PATH")]
+    snapshot_path: PathBuf,
 }
 
 #[tokio::main]
@@ -53,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
         min_tip_lamports: cli.min_tip_lamports,
         programs_of_interest: cli.programs_of_interest,
         validator_keypair_path: cli.validator_keypair_path,
+        ledger_path: cli.ledger_path,
+        snapshot_path: cli.snapshot_path,
     };
 
     let addr = cli.grpc_addr.parse()?;

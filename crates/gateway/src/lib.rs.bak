@@ -12,18 +12,19 @@ use be_proto::block_engine::block_engine_validator_server::{
     BlockEngineValidator, BlockEngineValidatorServer,
 };
 use be_proto::block_engine::{
-    packet_batch_update::Msg as PacketBatchUpdateMsg, AccountsOfInterestRequest,
-    AccountsOfInterestUpdate, BlockBuilderFeeInfoRequest, BlockBuilderFeeInfoResponse,
-    PacketBatchUpdate, ProgramsOfInterestRequest, ProgramsOfInterestUpdate,
-    StartExpiringPacketStreamResponse, SubscribeBundlesRequest, SubscribeBundlesResponse,
+    AccountsOfInterestRequest, AccountsOfInterestUpdate, BlockBuilderFeeInfoRequest,
+    BlockBuilderFeeInfoResponse, PacketBatchUpdate, ProgramsOfInterestRequest,
+    ProgramsOfInterestUpdate, StartExpiringPacketStreamResponse, SubscribeBundlesRequest,
+    SubscribeBundlesResponse, packet_batch_update::Msg as PacketBatchUpdateMsg,
 };
 use be_proto::bundle::{BundleResult, BundleUuid};
 use be_proto::packet::PacketBatch;
 use be_proto::relayer::relayer_server::{Relayer, RelayerServer};
 use be_proto::relayer::{
-    subscribe_packets_response::Msg as RelayerSubscribePacketsResponseMsg, GetTpuConfigsRequest,
-    GetTpuConfigsResponse, SubscribePacketsRequest as RelayerSubscribePacketsRequest,
+    GetTpuConfigsRequest, GetTpuConfigsResponse,
+    SubscribePacketsRequest as RelayerSubscribePacketsRequest,
     SubscribePacketsResponse as RelayerSubscribePacketsResponse,
+    subscribe_packets_response::Msg as RelayerSubscribePacketsResponseMsg,
 };
 use be_proto::searcher::searcher_service_server::{SearcherService, SearcherServiceServer};
 use be_proto::shared::{Header, Socket};
@@ -49,46 +50,31 @@ use solana_sdk::transaction::Transaction;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::Server};
 use warp::Filter;
 
-/// 블록 엔진 게이트웨이의 설정을 나타냅니다.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
-    /// 솔라나 RPC 엔드포인트의 URL입니다.
     pub rpc_url: String,
-    /// TPU (트랜잭션 처리 장치)의 IP 주소입니다.
     pub tpu_ip: String,
-    /// TPU의 포트입니다.
     pub tpu_port: u16,
-    /// TPU 패킷을 전달할 IP 주소입니다.
     pub tpu_forward_ip: String,
-    /// TPU 패킷을 전달할 포트입니다.
     pub tpu_forward_port: u16,
-    /// 블록 빌더의 공개 키입니다.
     pub block_builder_pubkey: String,
-    /// 블록 빌더의 수수료율입니다.
     pub block_builder_commission: u64,
-    /// 번들의 최소 크기입니다.
     pub min_bundle_size: usize,
-    /// 번들의 최소 팁 (lamports 단위) 입니다.
     pub min_tip_lamports: u64,
-    /// 관심 프로그램 목록입니다.
     pub programs_of_interest: Vec<String>,
-    /// 밸리데이터의 키페어 파일 경로입니다.
     pub validator_keypair_path: String,
-    /// 원장(ledger) 디렉토리 경로입니다.
     pub ledger_path: String,
-    /// 스냅샷 디렉토리 경로입니다.
     pub snapshot_path: PathBuf,
 }
 
-/// `solana_sdk::packet::Packet`을 protobuf로 정의된 `be_proto::packet::Packet`으로
-/// 변환하기 위한 래퍼 구조체입니다.
+// Wrapper struct for solana_sdk::packet::Packet to implement From trait
 struct WrappedSolanaPacket(solana_sdk::packet::Packet);
 
 impl From<WrappedSolanaPacket> for be_proto::packet::Packet {
@@ -113,14 +99,6 @@ impl From<WrappedSolanaPacket> for be_proto::packet::Packet {
     }
 }
 
-/// 블록 엔진 게이트웨이의 메인 진입점입니다.
-///
-/// 이 함수는 gRPC 서버, 프로메테우스 메트릭 엔드포인트, 그리고 번들 처리, 블록스토어 리플레이,
-/// 슬롯 업데이트와 관련된 모든 백그라운드 서비스를 초기화하고 실행합니다.
-///
-/// # 인자
-/// * `config` - 게이트웨이 설정입니다.
-/// * `addr` - gRPC 서버를 바인딩할 소켓 주소입니다.
 pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let (bundle_tx, _) = tokio::sync::broadcast::channel(128);
     let (packet_tx, _) = tokio::sync::broadcast::channel(128);
@@ -276,7 +254,6 @@ use solana_sdk::{
 };
 use tokio_util::time::DelayQueue;
 
-/// 들어오는 번들과 패킷을 처리합니다.
 struct BundleProcessor {
     bundle_rx: tokio::sync::broadcast::Receiver<BundleUuid>,
     packet_rx: tokio::sync::broadcast::Receiver<be_proto::block_engine::SubscribePacketsResponse>,
@@ -320,21 +297,22 @@ impl BundleProcessor {
         }
     }
 
-    /// 주어진 뱅크에 대해 번들을 시뮬레이션합니다.
-    ///
-    /// 부모 뱅크로부터 자식 뱅크를 생성하고 번들 안의 모든 트랜잭션을 처리합니다.
-    /// 이 시뮬레이션은 부모 뱅크의 상태에 영향을 주지 않으므로 안전합니다.
     fn simulate_bundle_bank(
         parent: Arc<Bank>,
         bundle: &be_proto::bundle::Bundle,
     ) -> Result<(), (Signature, String)> {
-        let child =
-            Bank::new_from_parent(parent.clone(), &parent.collector_id(), parent.slot() + 1);
+        let child = Bank::new_from_parent(
+            parent.clone(), // Arc<Bank>
+            &parent.collector_id(),
+            parent.slot() + 1,
+        );
 
         for pkt in &bundle.packets {
             let tx: VersionedTransaction = bincode::deserialize(&pkt.data).unwrap();
             let sig = tx.signatures[0];
 
+            // 2.3 에서는 VersionedTransaction 지원 함수가 아직 없으므로
+            // 먼저 legacy Transaction 으로 down‑cast
             let legacy = vtx_to_legacy(&tx).map_err(|e| (sig, e.to_string()))?;
             if let Err(e) = child.process_transaction(&legacy) {
                 return Err((sig, format!("{:?}", e)));
@@ -343,9 +321,6 @@ impl BundleProcessor {
         Ok(())
     }
 
-    /// 번들 프로세서의 메인 루프입니다.
-    ///
-    /// 들어오는 번들을 수신하고, 시뮬레이션하며, 그 결과를 전송합니다.
     async fn run(mut self) {
         loop {
             tokio::select! {
@@ -399,6 +374,7 @@ impl BundleProcessor {
                     match packet_batch {
                         Ok(packet_batch) => {
                             tracing::info!("Processing packet batch: {:?}", packet_batch);
+                            // Packets are already forwarded to ValidatorSvc, no further action here for now
                         },
                         Err(e) => tracing::error!("Error receiving packet batch: {:?}", e),
                     }
@@ -408,7 +384,6 @@ impl BundleProcessor {
     }
 }
 
-/// 현재 리더에게 전송될 준비가 된 번들을 위한 큐입니다.
 struct ForLeaderQueue {
     bundle_rx: tokio::sync::mpsc::Receiver<BundleUuid>,
     tpu_ip: String,
@@ -428,9 +403,6 @@ impl ForLeaderQueue {
         }
     }
 
-    /// 리더를 위한 큐의 메인 루프입니다.
-    ///
-    /// 번들을 수신하고 설정된 TPU 주소로 패킷을 전달합니다.
     async fn run(mut self) {
         loop {
             tokio::select! {
@@ -465,17 +437,18 @@ impl ForLeaderQueue {
     }
 }
 
+// -------------------- Auth --------------------
+
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
-use jsonwebtoken::{decode, encode, Header as JwtHeader, Validation};
+use jsonwebtoken::{Header as JwtHeader, Validation, decode, encode};
 use rand::rngs::OsRng;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
-/// JWT 생성 및 검증을 담당하는 인증 서비스입니다.
+// -------------------- Auth --------------------
+
 struct AuthSvc {
-    /// 재전송 공격을 방지하기 위한 보류 중인 챌린지 문자열 집합입니다.
-    pending: Arc<Mutex<HashSet<String>>>,
-    /// JWT 발급에 사용되는 서명 키입니다.
+    pending: Arc<Mutex<HashSet<String>>>, // 1회용 챌린지 문자열
     signing: SigningKey,
 }
 
@@ -489,27 +462,23 @@ impl AuthSvc {
     }
 }
 
-/// JWT의 클레임을 정의합니다.
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    /// 토큰의 주체 (서처의 공개 키)입니다.
-    sub: String,
-    /// 토큰의 만료 시간입니다.
-    exp: u64,
-    /// 토큰이 발급된 시간입니다.
-    iat: u64,
+    sub: String, // Subject (public key of the searcher)
+    exp: u64,    // Expiration time
+    iat: u64,    // Issued at
 }
 
 #[async_trait]
 impl AuthService for AuthSvc {
-    /// 클라이언트가 서명할 챌린지를 생성합니다.
     async fn generate_auth_challenge(
         &self,
         req: Request<GenerateAuthChallengeRequest>,
     ) -> Result<Response<GenerateAuthChallengeResponse>, Status> {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
         use solana_sdk::pubkey::Pubkey;
 
+        // relayer는 raw(32) 바이트 pubkey를 보낸다
         let raw = req.into_inner().pubkey;
         if raw.len() != 32 {
             return Err(Status::invalid_argument("pubkey must be 32 bytes"));
@@ -519,28 +488,30 @@ impl AuthService for AuthSvc {
         let token: [u8; 32] = rand::random();
         let token_b64 = general_purpose::STANDARD_NO_PAD.encode(token);
 
+        // "<b58-pubkey>-<base64-token>"
         let challenge_str = format!("{b58}-{token_b64}");
 
+        // 1회용으로 저장
         self.pending.lock().await.insert(challenge_str.clone());
 
         Ok(Response::new(GenerateAuthChallengeResponse {
-            challenge: token_b64,
+            challenge: token_b64, // ← Jito 프로토콜 그대로
         }))
     }
 
-    /// 클라이언트가 서명한 챌린지를 검증한 후 JWT를 생성합니다.
     async fn generate_auth_tokens(
         &self,
         req: Request<GenerateAuthTokensRequest>,
     ) -> Result<Response<GenerateAuthTokensResponse>, Status> {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
         use solana_sdk::bs58;
 
         let inner = req.into_inner();
-        let full_chal = inner.challenge;
-        let client_pk = inner.client_pubkey;
-        let sig_field = inner.signed_challenge;
+        let full_chal = inner.challenge; // "<pubkey>-<token>"
+        let client_pk = inner.client_pubkey; // 32 raw
+        let sig_field = inner.signed_challenge; // Vec<u8>
 
+        /* ① challenge 존재 & 1회 사용 */
         {
             let mut set = self.pending.lock().await;
             if !set.remove(&full_chal) {
@@ -548,6 +519,7 @@ impl AuthService for AuthSvc {
             }
         }
 
+        /* ② challenge 파싱 & pubkey 일치 */
         let (b58_pk, _token) = full_chal
             .split_once('-')
             .ok_or_else(|| Status::invalid_argument("Malformed challenge"))?;
@@ -558,10 +530,12 @@ impl AuthService for AuthSvc {
             return Err(Status::invalid_argument("pubkey mismatch"));
         }
 
+        /* ③ 서명 디코딩 (raw / b58 / hex / b64) */
         let sig_bytes = decode_sig(sig_field)?;
         let signature = ed25519_dalek::Signature::from_slice(&sig_bytes)
             .map_err(|_| Status::invalid_argument("bad signature len"))?;
 
+        /* ④ 서명 검증 (메시지 = full challenge 문자열 바이트) */
         let pk_arr: [u8; 32] = client_pk
             .as_slice()
             .try_into()
@@ -571,12 +545,13 @@ impl AuthService for AuthSvc {
             .verify(full_chal.as_bytes(), &signature)
             .map_err(|_| Status::unauthenticated("Signature verification failed"))?;
 
+        /* ───── 5. JWT 발급 (기존 로직 그대로) ───── */
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let access_token_expires_at = now + 600; // 10분
-        let refresh_token_expires_at = now + 3600; // 1시간
+        let access_token_expires_at = now + 600; // 10 min
+        let refresh_token_expires_at = now + 3600; // 1 h
 
         let access_claims = Claims {
             sub: general_purpose::STANDARD_NO_PAD.encode(&client_pk),
@@ -591,7 +566,7 @@ impl AuthService for AuthSvc {
 
         let der_priv = self
             .signing
-            .to_pkcs8_der()
+            .to_pkcs8_der() // PKCS#8(v2) → DER
             .map_err(|_| Status::internal("pkcs8 encode"))?;
         let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(der_priv.as_bytes());
 
@@ -620,7 +595,6 @@ impl AuthService for AuthSvc {
         }))
     }
 
-    /// 유효한 리프레시 토큰을 사용하여 액세스 토큰을 갱신합니다.
     async fn refresh_access_token(
         &self,
         req: Request<RefreshAccessTokenRequest>,
@@ -628,12 +602,14 @@ impl AuthService for AuthSvc {
         let inner_req = req.into_inner();
         let refresh_token_value = inner_req.refresh_token;
 
+        // ── ① pubkey → DER
         let der_pub = self
             .signing
             .verifying_key()
             .to_public_key_der()
             .map_err(|_| Status::internal("pkcs8 pub encode"))?;
 
+        // ── ② DecodingKey 생성
         let decoding_key = DecodingKey::from_ed_der(der_pub.as_bytes());
 
         let token_data = match decode::<Claims>(
@@ -650,7 +626,7 @@ impl AuthService for AuthSvc {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let access_token_expires_at = now + 600; // 10분
+        let access_token_expires_at = now + 600; // 10 minutes
 
         let access_claims = Claims {
             sub: pubkey.clone(),
@@ -660,7 +636,7 @@ impl AuthService for AuthSvc {
 
         let der_priv = self
             .signing
-            .to_pkcs8_der()
+            .to_pkcs8_der() // ← PKCS#8 priv → DER
             .map_err(|_| Status::internal("pkcs8 priv encode"))?;
         let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(der_priv.as_bytes());
         let header = JwtHeader {
@@ -683,7 +659,8 @@ impl AuthService for AuthSvc {
     }
 }
 
-/// 블록 엔진의 밸리데이터 대상 서비스입니다.
+// ---------------- Validator -------------------
+
 struct ValidatorSvc {
     bundle_tx: tokio::sync::broadcast::Sender<BundleUuid>,
     packet_tx: tokio::sync::broadcast::Sender<be_proto::block_engine::SubscribePacketsResponse>,
@@ -709,7 +686,6 @@ impl ValidatorSvc {
 
 #[async_trait]
 impl BlockEngineValidator for ValidatorSvc {
-    /// 블록 빌더의 수수료 정보를 반환합니다.
     async fn get_block_builder_fee_info(
         &self,
         _req: Request<BlockBuilderFeeInfoRequest>,
@@ -722,8 +698,6 @@ impl BlockEngineValidator for ValidatorSvc {
 
     type SubscribeBundlesStream =
         Pin<Box<dyn Stream<Item = Result<SubscribeBundlesResponse, Status>> + Send>>;
-
-    /// 번들 스트림을 구독합니다.
     async fn subscribe_bundles(
         &self,
         _req: Request<SubscribeBundlesRequest>,
@@ -742,8 +716,6 @@ impl BlockEngineValidator for ValidatorSvc {
                 + Send,
         >,
     >;
-
-    /// 패킷 스트림을 구독합니다.
     async fn subscribe_packets(
         &self,
         _req: Request<be_proto::block_engine::SubscribePacketsRequest>,
@@ -754,7 +726,8 @@ impl BlockEngineValidator for ValidatorSvc {
     }
 }
 
-/// 블록 엔진의 릴레이어 대상 서비스입니다.
+// -------------------- Relayer --------------------
+
 struct RelayerSvc {
     tpu_ip: String,
     tpu_port: u16,
@@ -775,7 +748,6 @@ impl RelayerSvc {
 
 #[async_trait]
 impl Relayer for RelayerSvc {
-    /// TPU 및 TPU-forward 설정을 반환합니다.
     async fn get_tpu_configs(
         &self,
         _req: Request<GetTpuConfigsRequest>,
@@ -794,8 +766,6 @@ impl Relayer for RelayerSvc {
 
     type SubscribePacketsStream =
         Pin<Box<dyn Stream<Item = Result<RelayerSubscribePacketsResponse, Status>> + Send>>;
-
-    /// 릴레이어로부터 패킷 스트림을 구독합니다.
     async fn subscribe_packets(
         &self,
         _req: Request<RelayerSubscribePacketsRequest>,
@@ -811,15 +781,17 @@ impl Relayer for RelayerSvc {
             };
             tracing::info!("Relayer listening for packets on 0.0.0.0:8001");
 
-            let mut buf = [0u8; 1232];
+            let mut buf = [0u8; 1232]; // PACKET_DATA_SIZE
             loop {
                 match socket.recv_from(&mut buf).await {
                     Ok((len, addr)) => {
-                        let packet =
-                            solana_sdk::packet::Packet::from_data(Some(&addr), &buf[..len])
-                                .unwrap();
+                        let packet = solana_sdk::packet::Packet::from_data(
+                            Some(&addr), // ✅ IpAddr
+                            &buf[..len],
+                        )
+                        .unwrap();
                         let packet_batch = PacketBatch {
-                            packets: vec![WrappedSolanaPacket(packet).into()],
+                            packets: vec![WrappedSolanaPacket(packet).into()], // Convert solana_sdk::packet::Packet to be_proto::packet::Packet
                         };
                         let header = Header {
                             ts: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
@@ -845,7 +817,8 @@ impl Relayer for RelayerSvc {
     }
 }
 
-/// 블록 엔진의 릴레이어 서비스입니다.
+// -------------------- BlockEngineRelayer --------------------
+
 struct BlockEngineRelayerSvc {
     packet_tx: tokio::sync::broadcast::Sender<be_proto::block_engine::SubscribePacketsResponse>,
     expiring_packets: Arc<Mutex<DelayQueue<String>>>,
@@ -867,10 +840,6 @@ impl BlockEngineRelayerSvc {
 
 #[async_trait]
 impl BlockEngineRelayer for BlockEngineRelayerSvc {
-    type SubscribeAccountsOfInterestStream =
-        Pin<Box<dyn Stream<Item = Result<AccountsOfInterestUpdate, Status>> + Send>>;
-
-    /// 관심 계정 스트림을 구독합니다.
     async fn subscribe_accounts_of_interest(
         &self,
         _req: Request<AccountsOfInterestRequest>,
@@ -878,14 +847,21 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
         tracing::debug!("SubscribeAccountsOfInterest RPC called.");
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
-            let update = AccountsOfInterestUpdate { accounts: vec![] };
+            let update = AccountsOfInterestUpdate {
+                accounts: vec![], // Empty vector means all accounts allowed
+            };
             if tx.send(Ok(update)).await.is_err() {
+                // If the receiver is dropped, we can stop sending updates.
                 return;
             }
 
+            // Continue sending updates periodically if needed, or remove this loop
+            // if only an initial update is required.
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                let update = AccountsOfInterestUpdate { accounts: vec![] };
+                let update = AccountsOfInterestUpdate {
+                    accounts: vec![], // Empty vector means all accounts allowed
+                };
                 if tx.send(Ok(update)).await.is_err() {
                     break;
                 }
@@ -895,10 +871,9 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
         Ok(Response::new(Box::pin(stream)))
     }
 
-    type SubscribeProgramsOfInterestStream =
-        Pin<Box<dyn Stream<Item = Result<ProgramsOfInterestUpdate, Status>> + Send>>;
+    type SubscribeAccountsOfInterestStream =
+        Pin<Box<dyn Stream<Item = Result<AccountsOfInterestUpdate, Status>> + Send>>;
 
-    /// 관심 프로그램 스트림을 구독합니다.
     async fn subscribe_programs_of_interest(
         &self,
         _req: Request<ProgramsOfInterestRequest>,
@@ -907,11 +882,13 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let programs_of_interest = self.config.programs_of_interest.clone();
 
+        // ▶ 첫 업데이트 즉시 발송
         let initial = ProgramsOfInterestUpdate {
             programs: programs_of_interest.clone(),
         };
         tx.send(Ok(initial)).await.ok();
 
+        // (선택) 이후 5초마다 갱신
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -929,10 +906,9 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
         )))
     }
 
-    type StartExpiringPacketStreamStream =
-        Pin<Box<dyn Stream<Item = Result<StartExpiringPacketStreamResponse, Status>> + Send>>;
+    type SubscribeProgramsOfInterestStream =
+        Pin<Box<dyn Stream<Item = Result<ProgramsOfInterestUpdate, Status>> + Send>>;
 
-    /// 만료되는 패킷 스트림을 시작합니다.
     async fn start_expiring_packet_stream(
         &self,
         mut req: Request<tonic::Streaming<PacketBatchUpdate>>,
@@ -961,8 +937,9 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
                                     header,
                                     batch: Some(packet_batch),
                                 };
+                                // Generate a unique ID for the packet batch to track its expiry
                                 let packet_batch_id = uuid::Uuid::new_v4().to_string();
-                                let expiry_duration = tokio::time::Duration::from_secs(2);
+                                let expiry_duration = tokio::time::Duration::from_secs(2); // Example TTL: 2 seconds
                                 expiring_packets_clone
                                     .lock()
                                     .await
@@ -976,6 +953,7 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
                                 }
                             }
                             PacketBatchUpdateMsg::Heartbeat(heartbeat) => {
+                                // Handle heartbeat if necessary, or just ignore
                                 tracing::debug!("Received heartbeat from relayer: {:?}", heartbeat);
                             }
                         }
@@ -986,18 +964,22 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
         tokio::spawn({
             let expiring_packets_clone = expiring_packets_clone_gc;
             async move {
+                // Periodically clean up expired packets
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // Check every 100ms
                     let mut expiring_packets = expiring_packets_clone.lock().await;
                     while let Some(expired) =
                         future::poll_fn(|cx| expiring_packets.poll_expired(cx)).await
                     {
                         tracing::info!("Packet batch expired: {}", expired.into_inner());
+                        // Here you would typically remove the packet from any active queues
+                        // or mark it as expired in your system.
                     }
                 }
             }
         });
         tokio::spawn(async move {
+            // Send a dummy heartbeat every 1 second
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 let heartbeat = StartExpiringPacketStreamResponse {
@@ -1011,9 +993,13 @@ impl BlockEngineRelayer for BlockEngineRelayerSvc {
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(stream)))
     }
+
+    type StartExpiringPacketStreamStream =
+        Pin<Box<dyn Stream<Item = Result<StartExpiringPacketStreamResponse, Status>> + Send>>;
 }
 
-/// 블록 엔진의 서처 대상 서비스입니다.
+// -------------------- Searcher --------------------
+
 struct SearcherSvc {
     bundle_tx: tokio::sync::broadcast::Sender<BundleUuid>,
     bundle_result_tx: tokio::sync::broadcast::Sender<BundleResult>,
@@ -1049,7 +1035,6 @@ impl SearcherService for SearcherSvc {
     type SubscribeBundleResultsStream =
         Pin<Box<dyn Stream<Item = Result<BundleResult, Status>> + Send>>;
 
-    /// 번들 결과 스트림을 구독합니다.
     async fn subscribe_bundle_results(
         &self,
         _req: Request<be_proto::searcher::SubscribeBundleResultsRequest>,
@@ -1060,11 +1045,11 @@ impl SearcherService for SearcherSvc {
         Ok(Response::new(Box::pin(stream)))
     }
 
-    /// 서처로부터 번들을 수신하고, 유효성을 검사한 후 처리를 위해 브로드캐스트합니다.
     async fn send_bundle(
         &self,
         req: Request<be_proto::searcher::SendBundleRequest>,
     ) -> Result<Response<be_proto::searcher::SendBundleResponse>, Status> {
+        // 1. Access Token 검증
         let auth_header = req
             .metadata()
             .get("authorization")
@@ -1088,18 +1073,23 @@ impl SearcherService for SearcherSvc {
         let bundle_req = req.into_inner();
         let bundle = bundle_req.bundle.unwrap();
 
+        // 2. Tip/priority fee 계산 및 번들 헤더 변경 (간단한 더미 계산)
         let mut total_tip_lamports = 0;
         let mut total_size = 0;
         for packet in &bundle.packets {
-            total_tip_lamports += 5000; // 더미 팁
+            // Simulate fee calculation (e.g., based on transaction size or some heuristic)
+            total_tip_lamports += 5000; // Dummy tip
             total_size += packet.data.len();
         }
+        // Update bundle header with calculated tip (assuming a field exists or can be added)
+        // For now, we'll just log it.
         tracing::info!(
             "Calculated total tip: {} lamports, total size: {} bytes",
             total_tip_lamports,
             total_size
         );
 
+        // 3. 최소 gas / size 제한 체크
         if total_size < self.min_bundle_size {
             return Err(Status::invalid_argument(format!(
                 "Bundle size {} bytes is below minimum {} bytes",
@@ -1128,13 +1118,12 @@ impl SearcherService for SearcherSvc {
         }))
     }
 
-    /// 다음 스케줄된 리더를 반환합니다.
     async fn get_next_scheduled_leader(
         &self,
         _req: Request<be_proto::searcher::NextScheduledLeaderRequest>,
     ) -> Result<Response<be_proto::searcher::NextScheduledLeaderResponse>, Status> {
         let current_slot = self.rpc_client.get_slot().await.unwrap_or(0);
-        let next_leader_slot = current_slot + 2;
+        let next_leader_slot = current_slot + 2; // Simulate next leader in 2 slots
         Ok(Response::new(
             be_proto::searcher::NextScheduledLeaderResponse {
                 current_slot,
@@ -1145,11 +1134,11 @@ impl SearcherService for SearcherSvc {
         ))
     }
 
-    /// 연결된 리더 목록을 반환합니다.
     async fn get_connected_leaders(
         &self,
         _req: Request<be_proto::searcher::ConnectedLeadersRequest>,
     ) -> Result<Response<be_proto::searcher::ConnectedLeadersResponse>, Status> {
+        // TODO: Fetch actual connected leaders from a validator set or similar source
         Ok(Response::new(
             be_proto::searcher::ConnectedLeadersResponse {
                 connected_validators: [
@@ -1172,11 +1161,11 @@ impl SearcherService for SearcherSvc {
         ))
     }
 
-    /// 지역별로 그룹화된 연결된 리더 목록을 반환합니다.
     async fn get_connected_leaders_regioned(
         &self,
         _req: Request<be_proto::searcher::ConnectedLeadersRegionedRequest>,
     ) -> Result<Response<be_proto::searcher::ConnectedLeadersRegionedResponse>, Status> {
+        // TODO: Fetch actual connected leaders by region
         Ok(Response::new(
             be_proto::searcher::ConnectedLeadersRegionedResponse {
                 connected_validators: [(
@@ -1198,11 +1187,11 @@ impl SearcherService for SearcherSvc {
         ))
     }
 
-    /// 팁 계정 목록을 반환합니다.
     async fn get_tip_accounts(
         &self,
         _req: Request<be_proto::searcher::GetTipAccountsRequest>,
     ) -> Result<Response<be_proto::searcher::GetTipAccountsResponse>, Status> {
+        // TODO: Fetch actual tip accounts from a configuration or on-chain source
         Ok(Response::new(be_proto::searcher::GetTipAccountsResponse {
             accounts: vec![
                 "TipAccount11111111111111111111111111111111".to_string(),
@@ -1211,11 +1200,11 @@ impl SearcherService for SearcherSvc {
         }))
     }
 
-    /// 사용 가능한 지역 목록을 반환합니다.
     async fn get_regions(
         &self,
         _req: Request<be_proto::searcher::GetRegionsRequest>,
     ) -> Result<Response<be_proto::searcher::GetRegionsResponse>, Status> {
+        // TODO: Fetch actual regions from a configuration or discovery service
         Ok(Response::new(be_proto::searcher::GetRegionsResponse {
             current_region: "us-east-1".to_string(),
             available_regions: vec![
@@ -1228,9 +1217,8 @@ impl SearcherService for SearcherSvc {
     }
 }
 
-/// 다양한 형식(raw, bs58, base64, hex)의 서명을 디코딩합니다.
 fn decode_sig(field: Vec<u8>) -> Result<Vec<u8>, Status> {
-    use base64::{engine::general_purpose, Engine as _};
+    use base64::{Engine as _, engine::general_purpose};
     use hex;
     use solana_sdk::bs58;
 
@@ -1253,17 +1241,13 @@ fn decode_sig(field: Vec<u8>) -> Result<Vec<u8>, Status> {
     Err(Status::invalid_argument("sig format"))
 }
 
-/// 주기적으로 블록스토어를 리플레이하여 네트워크와 동기화합니다.
+/// ledger를 주기적으로 replay 하여 Bank를 생성
 async fn replay_blockstore_loop(
     bank_forks: Arc<std::sync::RwLock<BankForks>>,
     leader_cache: Arc<LeaderScheduleCache>,
     blockstore: Arc<Blockstore>,
 ) {
     loop {
-        if let Err(e) = catch_up(&blockstore) {
-            tracing::warn!("rocks catch‑up failed: {e}");
-        }
-
         if let Err(e) = blockstore_processor::process_blockstore_from_root(
             &blockstore,
             &bank_forks,
@@ -1275,17 +1259,17 @@ async fn replay_blockstore_loop(
         ) {
             tracing::error!("process_blockstore failed: {e:?}");
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-/// 슬롯 업데이트를 구독하고 `BankForks`의 루트를 진행시킵니다.
 async fn slot_update_loop(
     shared_bank: Arc<tokio::sync::RwLock<Arc<Bank>>>,
     bank_forks: Arc<std::sync::RwLock<BankForks>>,
     leader_cache: Arc<LeaderScheduleCache>,
-    rpc_http: String,
+    rpc_http: String, // ex) "http://127.0.0.1:8899"
 ) {
+    // HTTP -> WS 주소 변환 (8899 -> 8900)
     let ws_url = rpc_http
         .replace("http://", "ws://")
         .replace("https://", "wss://")
@@ -1309,26 +1293,31 @@ async fn slot_update_loop(
     use futures_util::StreamExt;
     while let Some(update) = updates.next().await {
         if let solana_client::rpc_response::SlotUpdate::Root { slot, .. } = update {
+            // ① root 중복 방지
             if bank_forks.read().unwrap().root() == slot {
                 tracing::debug!("root {slot} already set, skipping");
-                continue;
+                continue; // 이미 처리한 root
             }
 
+            // ── ① Bank 존재 확인 ────────────────────────────
             if bank_forks.read().unwrap().get(slot).is_none() {
                 tracing::info!("root {slot} skipped – Bank not present yet");
                 continue;
             }
 
-            // {
-            //     let mut forks = bank_forks.write().unwrap();
-            //     if let Err(e) = forks.set_root(slot, None, None) {
-            //         tracing::error!("set_root({slot}) failed: {e:?}");
-            //         continue;
-            //     }
-            // }
+            // ── ② root 설정 (락 가드는 이 block 안에서만 존재) ──
+            {
+                let mut forks = bank_forks.write().unwrap();
+                if let Err(e) = forks.set_root(slot, None, None) {
+                    tracing::error!("set_root({slot}) failed: {e:?}");
+                }
+            } // ← 가드 drop → 이후 코드에서 await 사용 가능
 
+            // ── ③ 최신 root Bank 확보 ───────────────────────
             let new_root_bank = bank_forks.read().unwrap().root_bank();
             leader_cache.set_root(&new_root_bank);
+
+            // ── ④ async 락(write) – 이제 안전 ────────────────
             {
                 let mut w = shared_bank.write().await;
                 *w = new_root_bank;
@@ -1340,26 +1329,19 @@ async fn slot_update_loop(
     tracing::warn!("slot_updates stream closed");
 }
 
-/// 지정된 원장 경로에서 제네시스 설정을 읽어옵니다.
 fn read_genesis_config(ledger_path: &str) -> anyhow::Result<GenesisConfig> {
     let genesis_path = Path::new(ledger_path).join("genesis.bin");
     let file = std::fs::File::open(genesis_path)?;
     Ok(bincode::deserialize_from(file)?)
 }
 
-/// `VersionedTransaction`을 레거시 `Transaction`으로 변환합니다.
 fn vtx_to_legacy(v: &VersionedTransaction) -> anyhow::Result<Transaction> {
+    // ① legacy Tx 추출
     let legacy = v
         .clone()
         .into_legacy_transaction()
-        .ok_or_else(|| anyhow!("cannot down-cast to legacy tx"))?;
+        .ok_or_else(|| anyhow!("cannot down‑cast to legacy tx"))?;
+    // ② sanitize 호출
     legacy.sanitize()?;
     Ok(legacy)
-}
-
-fn catch_up(blockstore: &Blockstore) -> anyhow::Result<()> {
-    blockstore
-        .rocks() // &rocksdb::DB 가 반환
-        .try_catch_up_with_primary() // RocksDB 메서드
-        .map_err(|e| anyhow::anyhow!("catch_up: {e}"))
 }
