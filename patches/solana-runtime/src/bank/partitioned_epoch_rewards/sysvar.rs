@@ -58,7 +58,18 @@ impl Bank {
         distributed: u64,
     ) {
         let mut epoch_rewards = self.get_epoch_rewards_sysvar();
-        assert!(epoch_rewards.active);
+
+        // patch
+        if !epoch_rewards.active {
+            // 로컬/시작 경계에서 비활성일 수 있으므로 패닉 대신 스킵
+            solana_metrics::datapoint_info!(
+                "epoch-rewards-status-update",
+                ("slot", self.slot(), i64),
+                ("block_height", self.block_height(), i64),
+                ("note", "inactive", String)
+            );
+            return;
+        }
 
         epoch_rewards.distribute(distributed);
 

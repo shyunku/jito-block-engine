@@ -247,7 +247,7 @@ impl BankForks {
 
     pub fn insert_with_scheduling_mode(
         &mut self,
-        mode: SchedulingMode,
+        _mode: SchedulingMode,
         mut bank: Bank,
     ) -> BankWithScheduler {
         if self.root.load(Ordering::Relaxed) < self.highest_slot_at_startup {
@@ -255,29 +255,22 @@ impl BankForks {
         }
 
         let bank = Arc::new(bank);
-        let bank = if let Some(scheduler_pool) = &self.scheduler_pool {
-            Self::install_scheduler_into_bank(scheduler_pool, mode, bank)
-        } else {
-            BankWithScheduler::new_without_scheduler(bank)
-        };
-        let slot = bank.slot();
 
-        // patch
-        match self.banks.entry(slot) {
-            Entry::Occupied(o) => {
-                // 이미 같은 slot 존재 → no-op, 저장된 것을 반환
-                log::debug!(
-                    "insert_with_scheduling_mode(): duplicate slot {}, no-op",
-                    slot
-                );
-                return o.get().clone_with_scheduler(); // 또는 o.get().clone() (타입에 따라)
-            }
-            Entry::Vacant(v) => {
-                v.insert(bank.clone_with_scheduler());
-            }
+        // ✅ Secondary 리플레이에서는 스케줄러 설치하지 않음
+        let bank = BankWithScheduler::new_without_scheduler(bank);
+        log::info!("BankForks: scheduler DISABLED for slot {}", bank.slot());
+
+        let prev = self.banks.insert(bank.slot(), bank.clone_with_scheduler());
+        if prev.is_some() {
+            // 중복 삽입은 조용히 스킵 (idempotent)
+            log::debug!(
+                "insert_with_scheduling_mode(): duplicate slot {}, skipping",
+                bank.slot()
+            );
+            return bank; // <-- 반드시 bank를 반환
         }
 
-        // 최초 삽입인 경우에만 그래프 갱신
+        let slot = bank.slot();
         self.descendants.entry(slot).or_default();
         for parent in bank.proper_ancestors() {
             self.descendants.entry(parent).or_default().insert(slot);

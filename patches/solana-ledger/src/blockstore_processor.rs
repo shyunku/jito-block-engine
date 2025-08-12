@@ -1843,31 +1843,40 @@ fn process_next_slots(
             continue;
         }
 
-        let next_meta = blockstore
-            .meta(*next_slot)
-            .map_err(|err| {
-                warn!("Failed to load meta for slot {}: {:?}", next_slot, err);
-                BlockstoreProcessorError::FailedToLoadMeta
-            })?
-            .unwrap();
+        // meta(): Result<Option<SlotMeta>> → None이면 스킵
+        let next_meta_opt = blockstore.meta(*next_slot).map_err(|err| {
+            warn!("Failed to load meta for slot {}: {:?}", next_slot, err);
+            BlockstoreProcessorError::FailedToLoadMeta
+        })?;
+        let Some(next_meta) = next_meta_opt else {
+            // 루트 전진 중 캐시/메타가 정리되면 정상적으로 None이 나올 수 있음
+            trace!(
+                "meta for next_slot {} missing (probably purged) – skipping",
+                next_slot
+            );
+            continue;
+        };
 
+        // blockstore_processor는 full slot만 처리
         // Only process full slots in blockstore_processor, replay_stage
         // handles any partials
-        if next_meta.is_full() {
-            let next_bank = Bank::new_from_parent(
-                bank.clone(),
-                &leader_schedule_cache
-                    .slot_leader_at(*next_slot, Some(bank))
-                    .unwrap(),
-                *next_slot,
-            );
-            trace!(
-                "New bank for slot {}, parent slot is {}",
-                next_slot,
-                bank.slot(),
-            );
-            pending_slots.push((next_meta, next_bank, bank.last_blockhash()));
+        if !next_meta.is_full() {
+            continue;
         }
+
+        // 리더가 아직 계산/캐시 안됐으면 스킵 (epoch 경계 등)
+        let Some(leader) = leader_schedule_cache.slot_leader_at(*next_slot, Some(&**bank)) else {
+            trace!("no leader for slot {} yet – skipping", next_slot);
+            continue;
+        };
+
+        let next_bank = Bank::new_from_parent(bank.clone(), &leader, *next_slot);
+        trace!(
+            "New bank for slot {}, parent slot is {}",
+            next_slot,
+            bank.slot(),
+        );
+        pending_slots.push((next_meta, next_bank, bank.last_blockhash()));
     }
 
     // Reverse sort by slot, so the next slot to be processed can be popped
@@ -2151,6 +2160,25 @@ fn supermajority_root_from_vote_accounts(
     supermajority_root(&roots_stakes, total_epoch_stake)
 }
 
+fn drain_scheduler_fully(
+    bank: &BankWithScheduler,
+    timing: &mut ExecuteTimings,
+    is_primary: bool,
+) -> result::Result<(), BlockstoreProcessorError> {
+    while let Some((result, completed_timings)) = bank.wait_for_completed_scheduler() {
+        timing.accumulate(&completed_timings);
+        if let Err(e) = result {
+            // Secondary에선 AlreadyProcessed는 무시
+            if !is_primary && matches!(e, TransactionError::AlreadyProcessed) {
+                log::debug!("drain_scheduler: AlreadyProcessed – ignoring on secondary");
+                continue;
+            }
+            return Err(BlockstoreProcessorError::InvalidTransaction(e));
+        }
+    }
+    Ok(())
+}
+
 // Processes and replays the contents of a single slot, returns Error
 // if failed to play the slot
 #[allow(clippy::too_many_arguments)]
@@ -2167,8 +2195,7 @@ pub fn process_single_slot(
     timing: &mut ExecuteTimings,
 ) -> result::Result<(), BlockstoreProcessorError> {
     let slot = bank.slot();
-    // Mark corrupt slots as dead so validators don't replay this slot and
-    // see AlreadyProcessed errors later in ReplayStage
+
     let res = confirm_full_slot(
         blockstore,
         bank,
@@ -2182,6 +2209,8 @@ pub fn process_single_slot(
         timing,
     )
     .and_then(|()| {
+        // 기존의 '한 번만' wait 대신, 여기서는 그대로 두고
+        // 아래에서 drain_scheduler_fully로 전량 비움
         if let Some((result, completed_timings)) = bank.wait_for_completed_scheduler() {
             timing.accumulate(&completed_timings);
             result?
@@ -2190,15 +2219,14 @@ pub fn process_single_slot(
     });
 
     match res {
-        // ✨ 중복 트랜잭션은 비치명적: 슬롯 실패로 올리지 않고 통과
-        Err(BlockstoreProcessorError::InvalidTransaction(TransactionError::AlreadyProcessed)) => {
-            log::debug!(
-                "slot {}: AlreadyProcessed tx – non-fatal on secondary",
-                slot
-            );
-            // 아무 것도 하지 않고 진행
+        Err(BlockstoreProcessorError::InvalidTransaction(TransactionError::AlreadyProcessed))
+            if !blockstore.is_primary_access() =>
+        {
+            log::debug!("slot {}: AlreadyProcessed – non-fatal on secondary", slot);
+            // 🔑 스케줄러 작업 전부 drain (freeze 전에 반드시!)
+            drain_scheduler_fully(bank, timing, /*is_primary=*/ false)?;
+            // 계속 진행
         }
-        // 그 외 에러는 기존 로직 유지
         Err(err) => {
             warn!("slot {} failed to verify: {}", slot, err);
             if blockstore.is_primary_access() {
@@ -2213,41 +2241,38 @@ pub fn process_single_slot(
             }
             return Err(err);
         }
-        Ok(()) => {}
+        Ok(()) => {
+            drain_scheduler_fully(bank, timing, blockstore.is_primary_access())?;
+        }
     }
 
-    if let Err(err) = res {
-        return Err(err);
-    }
-
-    if let Some((result, _timings)) = bank.wait_for_completed_scheduler() {
-        result?
-    }
-
-    let block_id = blockstore.check_last_fec_set_and_get_block_id(slot, bank.hash(), &bank.feature_set)
+    let block_id = blockstore
+        .check_last_fec_set_and_get_block_id(slot, bank.hash(), &bank.feature_set)
         .inspect_err(|err| {
             warn!("slot {} failed last fec set checks: {}", slot, err);
             if blockstore.is_primary_access() {
-                blockstore.set_dead_slot(slot).expect("Failed to mark slot as dead in blockstore");
+                blockstore
+                    .set_dead_slot(slot)
+                    .expect("Failed to mark slot as dead in blockstore");
             } else {
-                info!("Failed last fec set checks slot {slot} won't be marked dead due to being secondary blockstore access");
+                info!(
+                    "Failed last fec set checks slot {slot} won't be marked dead due to being secondary blockstore access"
+                );
             }
-    })?;
+        })?;
+
     bank.set_block_id(block_id);
-    bank.freeze(); // all banks handled by this routine are created from complete slots
+    bank.freeze();
 
     if let Some(slot_callback) = &opts.slot_callback {
         slot_callback(bank);
     }
-
     if blockstore.is_primary_access() {
         blockstore.insert_bank_hash(bank.slot(), bank.hash(), false);
     }
-
     if let Some(transaction_status_sender) = transaction_status_sender {
         transaction_status_sender.send_transaction_status_freeze_message(bank);
     }
-
     Ok(())
 }
 

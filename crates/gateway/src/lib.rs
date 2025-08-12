@@ -51,7 +51,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{transport::Server, Request, Response, Status};
 use warp::Filter;
@@ -234,18 +233,16 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
         _for_leader_tx,
         shared_bank.clone(),
     );
+    tokio::spawn(bundle_processor.run());
+
+    let (root_tx, root_rx) = tokio::sync::watch::channel(0u64);
     tokio::spawn(replay_blockstore_loop(
         bank_forks.clone(),
         leader_cache.clone(),
         blockstore.clone(),
+        root_rx,
     ));
-    tokio::spawn(bundle_processor.run());
-    tokio::spawn(slot_update_loop(
-        shared_bank.clone(),
-        bank_forks.clone(),
-        leader_cache.clone(),
-        rpc_url,
-    ));
+    tokio::spawn(slot_update_loop(rpc_url, root_tx));
 
     let for_leader_queue =
         ForLeaderQueue::new(for_leader_rx, config.tpu_ip.clone(), config.tpu_port);
@@ -1268,12 +1265,35 @@ async fn replay_blockstore_loop(
     bank_forks: Arc<std::sync::RwLock<BankForks>>,
     leader_cache: Arc<LeaderScheduleCache>,
     blockstore: Arc<Blockstore>,
+    mut root_rx: tokio::sync::watch::Receiver<u64>,
 ) {
+    use tokio::time::{interval, sleep, Duration};
+
+    let mut last_processed_tip = 0u64;
+    let mut want_root = *root_rx.borrow();
+    let mut tick = interval(Duration::from_millis(300));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
+        tokio::select! {
+            // 새 root가 오면 want_root 갱신
+            changed = root_rx.changed() => {
+                if changed.is_err() {
+                    tracing::warn!("root_rx closed; stopping replay loop");
+                    return;
+                }
+                want_root = *root_rx.borrow_and_update();
+                // tracing::info!("pubsub: new root={}", want_root);
+            }
+            // root 이벤트가 없어도 주기적으로 catch up
+            _ = tick.tick() => {}
+        }
+
         if let Err(e) = catch_up(&blockstore) {
             tracing::warn!("rocks catch‑up failed: {e}");
         }
 
+        let tip_before = bank_forks.read().unwrap().working_bank().slot();
         if let Err(e) = blockstore_processor::process_blockstore_from_root(
             &blockstore,
             &bank_forks,
@@ -1285,27 +1305,75 @@ async fn replay_blockstore_loop(
         ) {
             tracing::error!("process_blockstore failed: {e:?}");
         }
+        let tip_after = bank_forks.read().unwrap().working_bank().slot();
 
+        // --- advance root (핵심) ---
+        let mut banks_to_drop = Vec::new(); // 락 밖에서 drop하려고 임시로 빼둠
         {
-            let r = bank_forks.read().unwrap();
-            tracing::info!(
-                "progress: root={}, tip={}, banks={}",
-                r.root(),
-                r.working_bank().slot(),
-                r.banks().len()
-            );
+            let mut forks = bank_forks.write().unwrap();
+            let cur_root = forks.root();
+
+            if want_root > cur_root {
+                let actual_root = if forks.get(want_root).is_some() {
+                    want_root
+                } else {
+                    forks
+                        .banks()
+                        .keys()
+                        .filter(|s| **s <= want_root)
+                        .max()
+                        .copied()
+                        .unwrap_or(cur_root)
+                };
+
+                if actual_root > cur_root {
+                    let root_bank_arc = forks
+                        .get(actual_root)
+                        .expect("root bank must exist")
+                        .clone();
+
+                    match forks.set_root(actual_root, None, None) {
+                        Ok(dropped) => {
+                            let tip = forks.working_bank().slot();
+                            let banks_len = forks.banks().len();
+                            tracing::info!(
+                                "blockstore set root progress: root={} -> {}, tip={}, banks={}",
+                                cur_root,
+                                actual_root,
+                                tip,
+                                banks_len,
+                            );
+                            banks_to_drop = dropped; // 락 해제 후 drop
+
+                            drop(forks);
+                            leader_cache.set_root(&root_bank_arc);
+                            drop(root_bank_arc);
+                        }
+                        Err(e) => {
+                            tracing::warn!("set_root({actual_root}) failed: {e:?}");
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "want_root={} not present yet (cur_root={} tip={})",
+                        want_root,
+                        cur_root,
+                        forks.working_bank().slot()
+                    );
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(banks_to_drop); // 락 해제 후 드롭
+
+        if tip_after == tip_before && tip_after == last_processed_tip {
+            sleep(Duration::from_millis(200)).await;
+        }
+        last_processed_tip = tip_after;
     }
 }
 
 /// 슬롯 업데이트를 구독하고 `BankForks`의 루트를 진행시킵니다.
-async fn slot_update_loop(
-    shared_bank: Arc<tokio::sync::RwLock<Arc<Bank>>>,
-    bank_forks: Arc<std::sync::RwLock<BankForks>>,
-    leader_cache: Arc<LeaderScheduleCache>,
-    rpc_http: String,
-) {
+async fn slot_update_loop(rpc_http: String, root_tx: tokio::sync::watch::Sender<u64>) {
     let ws_url = rpc_http
         .replace("http://", "ws://")
         .replace("https://", "wss://")
@@ -1327,27 +1395,15 @@ async fn slot_update_loop(
     };
 
     use futures_util::StreamExt;
+    let mut last_pubsub_root = 0u64;
+
     while let Some(update) = updates.next().await {
         if let solana_client::rpc_response::SlotUpdate::Root { slot, .. } = update {
-            if bank_forks.read().unwrap().root() == slot {
-                tracing::debug!("root {slot} already set, skipping");
-                continue;
+            if slot > last_pubsub_root {
+                last_pubsub_root = slot;
+                let _ = root_tx.send(slot);
+                tracing::debug!("pubsub: new root found: {}", slot);
             }
-
-            if bank_forks.read().unwrap().get(slot).is_none() {
-                tracing::info!("root {slot} skipped – Bank not present yet");
-                continue;
-            }
-
-            let tip_bank = bank_forks.read().unwrap().working_bank();
-            {
-                let mut w = shared_bank.write().await;
-                *w = tip_bank;
-            }
-            tracing::info!(
-                "Shared bank moved to working slot {}",
-                shared_bank.read().await.slot()
-            );
         }
     }
     tracing::warn!("slot_updates stream closed");
