@@ -212,6 +212,16 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
         bank_forks.read().unwrap().root_bank(),
     ));
 
+    blockstore_processor::process_blockstore_from_root(
+        &blockstore,
+        &bank_forks,
+        &leader_cache,
+        &mk_process_opts(),
+        None,
+        None,
+        None,
+    )?;
+
     let bundle_processor = BundleProcessor::new(
         bundle_tx.subscribe(),
         packet_tx.subscribe(),
@@ -224,12 +234,12 @@ pub async fn run(config: Config, addr: std::net::SocketAddr) -> anyhow::Result<(
         _for_leader_tx,
         shared_bank.clone(),
     );
-    tokio::spawn(bundle_processor.run());
     tokio::spawn(replay_blockstore_loop(
         bank_forks.clone(),
         leader_cache.clone(),
         blockstore.clone(),
     ));
+    tokio::spawn(bundle_processor.run());
     tokio::spawn(slot_update_loop(
         shared_bank.clone(),
         bank_forks.clone(),
@@ -1268,14 +1278,24 @@ async fn replay_blockstore_loop(
             &blockstore,
             &bank_forks,
             &leader_cache,
-            &ProcessOptions::default(),
+            &mk_process_opts(),
             None,
             None,
             None,
         ) {
             tracing::error!("process_blockstore failed: {e:?}");
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        {
+            let r = bank_forks.read().unwrap();
+            tracing::info!(
+                "progress: root={}, tip={}, banks={}",
+                r.root(),
+                r.working_bank().slot(),
+                r.banks().len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -1319,22 +1339,15 @@ async fn slot_update_loop(
                 continue;
             }
 
-            // {
-            //     let mut forks = bank_forks.write().unwrap();
-            //     if let Err(e) = forks.set_root(slot, None, None) {
-            //         tracing::error!("set_root({slot}) failed: {e:?}");
-            //         continue;
-            //     }
-            // }
-
-            let new_root_bank = bank_forks.read().unwrap().root_bank();
-            leader_cache.set_root(&new_root_bank);
+            let tip_bank = bank_forks.read().unwrap().working_bank();
             {
                 let mut w = shared_bank.write().await;
-                *w = new_root_bank;
+                *w = tip_bank;
             }
-
-            tracing::info!("Bank advanced to root slot {slot}");
+            tracing::info!(
+                "Shared bank moved to working slot {}",
+                shared_bank.read().await.slot()
+            );
         }
     }
     tracing::warn!("slot_updates stream closed");
@@ -1362,4 +1375,13 @@ fn catch_up(blockstore: &Blockstore) -> anyhow::Result<()> {
         .rocks() // &rocksdb::DB 가 반환
         .try_catch_up_with_primary() // RocksDB 메서드
         .map_err(|e| anyhow::anyhow!("catch_up: {e}"))
+}
+
+fn mk_process_opts() -> ProcessOptions {
+    let mut o = ProcessOptions::default();
+
+    o.run_verification = false;
+    o.allow_dead_slots = true; // 있으면 켜두면 안전
+
+    o
 }

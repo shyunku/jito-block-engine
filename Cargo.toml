@@ -4,3 +4,4 @@ members = ["crates/*"]
 
 [patch.crates-io]
 solana-ledger = { path = "patches/solana-ledger" }
+solana-runtime = { path = "patches/solana-runtime" }

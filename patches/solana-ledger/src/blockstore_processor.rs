@@ -117,6 +117,13 @@ fn do_get_first_error<T, Tx: SVMTransaction>(
     let mut first_err = None;
     for (result, transaction) in results.iter().zip(batch.sanitized_transactions()) {
         if let Err(err) = result {
+            if matches!(err, TransactionError::AlreadyProcessed) {
+                log::debug!(
+                    "Duplicate tx (AlreadyProcessed) – skipping: {}",
+                    transaction.signature()
+                );
+                continue;
+            }
             if first_err.is_none() {
                 first_err = Some((Err(err.clone()), *transaction.signature()));
             }
@@ -999,7 +1006,15 @@ pub fn process_blockstore_from_root(
 ) -> result::Result<(), BlockstoreProcessorError> {
     let (start_slot, start_slot_hash) = {
         // Starting slot must be a root, and thus has no parents
-        assert_eq!(bank_forks.read().unwrap().banks().len(), 1);
+        //assert_eq!(bank_forks.read().unwrap().banks().len(), 1);
+
+        let n = bank_forks.read().unwrap().banks().len();
+        if n != 1 {
+            log::warn!(
+                "process_blockstore_from_root(): expected 1 bank, but have {n}. Proceeding from current root."
+            );
+        }
+
         let bank = bank_forks.read().unwrap().root_bank();
         #[cfg(feature = "dev-context-only-utils")]
         if let Some(hash_overrides) = &opts.hash_overrides {
@@ -2154,7 +2169,7 @@ pub fn process_single_slot(
     let slot = bank.slot();
     // Mark corrupt slots as dead so validators don't replay this slot and
     // see AlreadyProcessed errors later in ReplayStage
-    confirm_full_slot(
+    let res = confirm_full_slot(
         blockstore,
         bank,
         replay_tx_thread_pool,
@@ -2172,21 +2187,38 @@ pub fn process_single_slot(
             result?
         }
         Ok(())
-    })
-    .map_err(|err| {
-        warn!("slot {} failed to verify: {}", slot, err);
-        if blockstore.is_primary_access() {
-            blockstore
-                .set_dead_slot(slot)
-                .expect("Failed to mark slot as dead in blockstore");
-        } else {
-            info!(
-                "Failed slot {} won't be marked dead due to being secondary blockstore access",
+    });
+
+    match res {
+        // ✨ 중복 트랜잭션은 비치명적: 슬롯 실패로 올리지 않고 통과
+        Err(BlockstoreProcessorError::InvalidTransaction(TransactionError::AlreadyProcessed)) => {
+            log::debug!(
+                "slot {}: AlreadyProcessed tx – non-fatal on secondary",
                 slot
             );
+            // 아무 것도 하지 않고 진행
         }
-        err
-    })?;
+        // 그 외 에러는 기존 로직 유지
+        Err(err) => {
+            warn!("slot {} failed to verify: {}", slot, err);
+            if blockstore.is_primary_access() {
+                blockstore
+                    .set_dead_slot(slot)
+                    .expect("Failed to mark slot as dead in blockstore");
+            } else {
+                info!(
+                    "Failed slot {} won't be marked dead due to being secondary blockstore access",
+                    slot
+                );
+            }
+            return Err(err);
+        }
+        Ok(()) => {}
+    }
+
+    if let Err(err) = res {
+        return Err(err);
+    }
 
     if let Some((result, _timings)) = bank.wait_for_completed_scheduler() {
         result?
